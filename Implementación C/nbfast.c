@@ -17,6 +17,7 @@ Pere Muñoz Figuerol - 48252062V
 #include<unistd.h>
 #include<pthread.h>
 #include<semaphore.h>
+#include <stdbool.h>
 
 #ifdef D_GLFW_SUPPORT
     #include<GLFW/glfw3.h>
@@ -91,16 +92,14 @@ struct GlobalStruct{
     double *sharedBuff;
     struct Node *tree;
     int nShared;
+    bool lastIteration;
 };
 
 // Global synchronization variables
 sem_t calculateForceSem;
-pthread_mutex_t nLocalMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t remainingParticlesMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_barrier_t calculateForceBarrier;
-pthread_cond_t endedCalculatingForce = PTHREAD_COND_INITIALIZER;
-pthread_mutex_t endedCalculatingForceMutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t globalStructMutex = PTHREAD_MUTEX_INITIALIZER;
+sem_t endedCalculatingForce;
 
 // Global variables
 pthread_t *threads;
@@ -113,6 +112,10 @@ void cancelThreads(pthread_t* tids, int nThreads){
         pthread_cancel(tids[i]);
     }
     exit(-1);
+}
+
+void destroySyncVariables(){
+
 }
 
 void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n){
@@ -624,12 +627,10 @@ void threadFunction(int id) {
         printf("Thread %d is waiting for a job\n", id);
         // Wait for the main thread to signal that the tree is built and the particles are initialized.
         sem_wait(&calculateForceSem);
-        // Block the semaphore again.
         printf("Thread %d is calculating the force\n", id);
 
 
         // Calculate index of the particles to be calculated.
-
         int particlesPerThread = globalStruct.nLocal / numberOfThreads;
 
         int start = id * particlesPerThread + 1;
@@ -650,7 +651,6 @@ void threadFunction(int id) {
         int *indexes = globalStruct.indexes;
         double *sharedBuff = globalStruct.sharedBuff;
         struct Node* tree = globalStruct.tree;
-        int nShared = globalStruct.nShared;
 
         printf("Thread %d is calculating the force for particles %d to %d\n", id, start, end);
         // Then, we can calculate the forces.
@@ -678,21 +678,14 @@ void threadFunction(int id) {
             cancelThreads(threads, numberOfThreads-1);
         }
         if (ret == PTHREAD_BARRIER_SERIAL_THREAD) {
-            for (i = 0; i < globalStruct.nLocal; ++i) {
-                //Kick out particle if it went out of the box (0,1)x(0,1)
-                if(sharedBuff[PX(indexes[i])]<=0 || sharedBuff[PX(indexes[i])]>=1 || sharedBuff[PY(indexes[i])] <=0 || sharedBuff[PY(indexes[i])] >= 1){
-                    int r;
-                    globalStruct.nLocal--;
-                    nShared--;
-                    for(r=i;r<globalStruct.nLocal;r++){
-                        indexes[r]=indexes[r+1];
-                    }
-                    i--;
-                }
-            }
             printf("Thread %d is unlocking the main thread for doing another iteration\n", id);
             // Barrier released, we can signal the main thread that the calculation is done.
-            pthread_cond_signal(&endedCalculatingForce);
+            sem_post(&endedCalculatingForce);
+        }
+        // If it is the last iteration, we can end the thread.
+        if (globalStruct.lastIteration) {
+            printf("Thread %d is ending\n", id);
+            pthread_exit(NULL);
         }
     }
 }
@@ -850,10 +843,12 @@ int main(int argc, char *argv[]){
 
     // Initialize global variables
     numberOfThreads = M;
+    globalStruct.lastIteration = false;
     // Init the calculateForcesBarrier
     pthread_barrier_init(&calculateForceBarrier, NULL, M-1);
-    // Init semaphore to 0
+    // Init semaphores
     sem_init(&calculateForceSem, 0, 0);
+    sem_init(&endedCalculatingForce, 0, 0);
 
     // Start the threads
     threads = malloc(sizeof(pthread_t) * M-1);
@@ -896,6 +891,7 @@ int main(int argc, char *argv[]){
 
     int nLocal=nShared;
     int nOriginal=nShared;
+    globalStruct.nLocal = nLocal;
     //Buffer to hold velocity in x and y, and acceleration in x and y also
     double* localBuff = (double *) malloc(sizeof(double)*(4*nLocal));
     //This is for opengl
@@ -970,13 +966,16 @@ int main(int argc, char *argv[]){
 
             // Assign values to the global struct
             globalStruct.localBuff = localBuff;
-            globalStruct.nLocal = nLocal;
             globalStruct.indexes = indexes;
             globalStruct.sharedBuff = sharedBuff;
             globalStruct.tree = tree;
             globalStruct.nShared = nShared;
 
-            // Unlock the semaphore to start the threads
+            if (count==steps) {
+                globalStruct.lastIteration = true;
+            }
+
+            // Unlock the semaphore to start the threads calculating the forces
             for (i = 0; i < M-1; i++) {
                 sem_post(&calculateForceSem);
             }
@@ -999,10 +998,21 @@ int main(int argc, char *argv[]){
         	}
 
             // Wait for all the threads to finish its work
-            pthread_mutex_lock(&endedCalculatingForceMutex);
-            pthread_cond_wait(&endedCalculatingForce, &endedCalculatingForceMutex);
-            printf("All threads finished calculating forces, main thread will continue to the iteration %d\n", count+1);
-            pthread_mutex_unlock(&endedCalculatingForceMutex);
+            sem_wait(&endedCalculatingForce);
+            // Then check if there are particles outside the boundaries, and remove them
+            printf("All threads finished calculating forces, main thread will process the eliminated particles and continue to the next iteration\n");
+            for (i = 0; i < globalStruct.nLocal; ++i) {
+                //Kick out particle if it went out of the box (0,1)x(0,1)
+                if(sharedBuff[PX(indexes[i])]<=0 || sharedBuff[PX(indexes[i])]>=1 || sharedBuff[PY(indexes[i])] <=0 || sharedBuff[PY(indexes[i])] >= 1){
+                    int r;
+                    globalStruct.nLocal--;
+                    nShared--;
+                    for(r=i;r<globalStruct.nLocal;r++){
+                        indexes[r]=indexes[r+1];
+                    }
+                    i--;
+                }
+            }
 
 			//To be able to store the positions of the particles
             ShowWritePartialResults(count,nOriginal, nShared, indexes, sharedBuff);
@@ -1013,6 +1023,14 @@ int main(int argc, char *argv[]){
 #ifdef D_GLFW_SUPPORT
 	}
 #endif
+    // Join the threads
+    for (i = 0; i < M-1; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Free the memory and destroy the mutexes and semaphores
+    free(threads);
+    destroySyncVariables();
 
     EndTime = clock();
     TimeSpent = (double)(EndTime - StartTime) / CLOCKS_PER_SEC;
