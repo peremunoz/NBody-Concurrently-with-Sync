@@ -77,22 +77,22 @@ struct BuildTreeStruct{
     int remainingThreads;
 };
 
-struct CalculateForceStruct{
-    struct Node* tree;
-    double* sharedBuff;
-    double* localBuff;
-    int index;
-    int remainingThreads;
-};
-
 struct GlobalStruct{
     int nLocal;
     double* localBuff;
     int *indexes;
     double *sharedBuff;
     struct Node *tree;
-    int nShared;
+    int actualIteration;
     bool lastIteration;
+};
+
+struct Statistics{
+    double timePerIteration;
+    double timePerMIterations;
+    int evaluatedParticles;
+    int removedParticles;
+    int numberOfSimplifications;
 };
 
 // Global synchronization variables
@@ -100,12 +100,17 @@ sem_t calculateForceSem;
 pthread_mutex_t remainingParticlesMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_barrier_t calculateForceBarrier;
 sem_t endedCalculatingForce;
+pthread_mutex_t statisticsMutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Global variables
 pthread_t *threads;
 int numberOfThreads;
+int iterationsToPrint;
 int remainingParticles;
 struct GlobalStruct globalStruct;
+struct Statistics* threadsStatistics;
+struct Statistics globalStatistics;
+
 
 void cancelThreads(pthread_t* tids, int nThreads){
     for(int i=0;i<nThreads;i++){
@@ -523,94 +528,6 @@ void buildTreeThread(struct BuildTreeStruct* data){
     }
 }
 
-void calculateForceThread(struct CalculateForceStruct* data){
-    // Unpack the information from the data struct
-    struct Node *tree = data->tree;
-    double* shrdBuff = data->sharedBuff;
-    double* localBuff = data->localBuff;
-    int index = data->index;
-    int remainingThreads = data->remainingThreads;
-
-    double distance = sqrt((tree->CMX-shrdBuff[PX(index)])*(tree->CMX-shrdBuff[PX(index)])+
-                           (tree->CMY-shrdBuff[PY(index)])*(tree->CMY-shrdBuff[PY(index)]));
-    // Necessary variables for concurrency
-    int tids_index = 0;
-    int possibleSubThreads = 0;
-    int remainingThreadsPerSubThread = 0;
-    int extraThreadsPerSubThread = 0;
-
-	//First we check if the node is not actually the same particle we are calculating
-    if(distance>0){
-		//Now, we know it is not because the is some distance between the Center of Mass and the particle
-		//If the node is external (only contains one particle) or is far away enough, we calculate the force with the center of mass
-        if(distance>rcutoff || tree->external){
-            double f;
-            if(distance<rlimit){
-                f=G*tree->mass/(rlimit*rlimit*distance);
-            } else {
-                f=G*tree->mass/(distance*distance*distance);
-            }
-            localBuff[AX(index)]+=f*(tree->CMX-shrdBuff[PX(index)]);
-            localBuff[AY(index)]+=f*(tree->CMY-shrdBuff[PY(index)]);
-        } else {
-			//If not, we recursively call the calculateForceThread() function in the children that are not empty.
-            int i;
-            //First we calculate the valid children of the node for assigning threads correctly.
-            for(i=0;i<4;i++){
-                if(tree->children[i]!=NULL){
-                    possibleSubThreads++;
-                }
-            }
-            //We calculate how many threads per children have to be assigned.
-            remainingThreadsPerSubThread = remainingThreads / possibleSubThreads;
-            extraThreadsPerSubThread = remainingThreads % possibleSubThreads;
-
-            pthread_t *tids = malloc(sizeof(pthread_t) * possibleSubThreads);
-            struct CalculateForceStruct *forceData = malloc(sizeof(struct CalculateForceStruct) * possibleSubThreads);
-
-            for(i=0;i<4;i++){
-                if(tree->children[i]!=NULL){
-                    // If there are free threads to be created, we execute the next recursive call concurrently.
-                    if(remainingThreads > 0) {
-                        // Create the CalculateForce struct only if we have threads available.
-                        forceData[tids_index].tree = tree->children[i];
-                        forceData[tids_index].sharedBuff = shrdBuff;
-                        forceData[tids_index].localBuff = localBuff;
-                        forceData[tids_index].index = index;
-                        forceData[tids_index].remainingThreads = 0;
-
-                        int assignedThreadsToSubThread = remainingThreadsPerSubThread;
-
-                        if (extraThreadsPerSubThread > 0) {
-                            assignedThreadsToSubThread++;
-                            extraThreadsPerSubThread--;
-                        }
-
-                        forceData[tids_index].remainingThreads = assignedThreadsToSubThread;
-
-                        remainingThreads = remainingThreads - assignedThreadsToSubThread;
-                        if(pthread_create(&tids[tids_index], NULL, (void *(*)(void *)) calculateForceThread, &forceData[tids_index])){
-                            perror("Error creating the calculateForceThread thread: ");
-                            cancelThreads(tids, tids_index);
-                        }
-                        tids_index++;
-                    } else { // If we don't have threads, we execute the sequential function without doing any malloc
-                        calculateForce(tree->children[i], shrdBuff, localBuff, index);
-                    }
-                }
-            }
-            for(i=0;i<tids_index;i++) {
-                if(pthread_join(tids[i], NULL)){
-                    perror("Error joining the calculateForceThread thread: ");
-                    cancelThreads(tids, tids_index);
-                }
-            }
-            free(forceData);
-            free(tids);
-            tids_index = 0;
-        }
-    }
-}
 
 void moveParticle(double *shrdBuff, double *localBuff, int index){
     //Unprecise but fast euler method for solving the time differential equation
@@ -624,11 +541,19 @@ void moveParticle(double *shrdBuff, double *localBuff, int index){
 
 void threadFunction(int id) {
     while (1) {
-        printf("Thread %d is waiting for a job\n", id);
         // Wait for the main thread to signal that the tree is built and the particles are initialized.
         sem_wait(&calculateForceSem);
-        printf("Thread %d is calculating the force\n", id);
 
+        // For preventing miscalculation of the average time for all threads, we update this time per M iterations variable here, in the M'th + 1 iteration
+        if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 1) {
+            pthread_mutex_lock(&statisticsMutex);
+            threadsStatistics[id].timePerMIterations = 0;
+            pthread_mutex_unlock(&statisticsMutex);
+        }
+
+        // When unlocked, init the timer for the calculation of the statistics
+        struct timespec startTime, endTime;
+        clock_gettime(CLOCK_MONOTONIC, &startTime);
 
         // Calculate index of the particles to be calculated.
         int particlesPerThread = globalStruct.nLocal / numberOfThreads;
@@ -652,9 +577,9 @@ void threadFunction(int id) {
         double *sharedBuff = globalStruct.sharedBuff;
         struct Node* tree = globalStruct.tree;
 
-        printf("Thread %d is calculating the force for particles %d to %d\n", id, start, end);
         // Then, we can calculate the forces.
         int i;
+        int removedParticles = 0;
         for(i=start; i < end; i++){
             //Set initial accelerations to zero
             localBuff[AX(indexes[i])]=0;
@@ -670,21 +595,52 @@ void threadFunction(int id) {
             }
             //Calculate new position
             moveParticle(sharedBuff,localBuff,indexes[i]);
+
+            if (sharedBuff[PX(indexes[i])]<=0 || sharedBuff[PX(indexes[i])]>=1 || sharedBuff[PY(indexes[i])] <=0 || sharedBuff[PY(indexes[i])] >= 1) {
+                // If the particle is out of the limits, we count it for the statistics.
+                removedParticles++;
+            }
         }
+
+        // Now that the calculation is done, we register the time it took to calculate the forces.
+        clock_gettime(CLOCK_MONOTONIC, &endTime);
+        double timeElapsed = (endTime.tv_sec - startTime.tv_sec);
+        timeElapsed += (endTime.tv_nsec - startTime.tv_nsec) / 1000000000.0;
+
+        // Update the statistics
+        pthread_mutex_lock(&statisticsMutex);
+        threadsStatistics[id].timePerIteration += timeElapsed;
+        threadsStatistics[id].timePerMIterations += timeElapsed;
+        threadsStatistics[id].evaluatedParticles += end - start;
+        threadsStatistics[id].removedParticles += removedParticles;
+        pthread_mutex_unlock(&statisticsMutex);
+
+        // Barrier for waiting for all threads to finish the calculation of the forces.
         int ret = pthread_barrier_wait(&calculateForceBarrier);
-        // Block the semaphore again.
+
+        // Once all threads have finished its calculation and updated its statistics, we can print the partial results if needed.
+        if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 0) {
+            double averageTimePerMIterations = 0;
+            pthread_mutex_lock(&statisticsMutex);
+            for (i = 0; i < numberOfThreads; i++) {
+                averageTimePerMIterations += threadsStatistics[i].timePerMIterations;
+            }
+            averageTimePerMIterations /= numberOfThreads;
+            pthread_mutex_unlock(&statisticsMutex);
+            printf("Thread [%d]: Average of %f seconds per iteration, %f seconds of unbalance %i evaluated particles, %i removed particles, %i of simplifications done.\n", id, threadsStatistics[id].timePerIteration/globalStruct.actualIteration, threadsStatistics[id].timePerMIterations-averageTimePerMIterations, threadsStatistics[id].evaluatedParticles, threadsStatistics[id].removedParticles, threadsStatistics[id].numberOfSimplifications);
+        }
+
         if (ret != 0 && ret != PTHREAD_BARRIER_SERIAL_THREAD) {
             perror("Error in the barrier: ");
             cancelThreads(threads, numberOfThreads-1);
         }
         if (ret == PTHREAD_BARRIER_SERIAL_THREAD) {
-            printf("Thread %d is unlocking the main thread for doing another iteration\n", id);
             // Barrier released, we can signal the main thread that the calculation is done.
             sem_post(&endedCalculatingForce);
         }
         // If it is the last iteration, we can end the thread.
         if (globalStruct.lastIteration) {
-            printf("Thread %d is ending\n", id);
+            printf("[%d] is ending\n", id);
             pthread_exit(NULL);
         }
     }
@@ -812,7 +768,7 @@ int main(int argc, char *argv[]){
     int nShared=500;
 	int steps=100;
     int M=4;
-    int iterationsToPrint=25;
+    iterationsToPrint=25;
     double *sharedBuff;
     double *radius;
     int *indexes, i;
@@ -844,8 +800,13 @@ int main(int argc, char *argv[]){
     // Initialize global variables
     numberOfThreads = M;
     globalStruct.lastIteration = false;
+
+    // Init the threads statistics array
+    threadsStatistics = (struct Statistics *) malloc(sizeof(struct Statistics) * M);
+
     // Init the calculateForcesBarrier
     pthread_barrier_init(&calculateForceBarrier, NULL, M-1);
+
     // Init semaphores
     sem_init(&calculateForceSem, 0, 0);
     sem_init(&endedCalculatingForce, 0, 0);
@@ -854,7 +815,7 @@ int main(int argc, char *argv[]){
     threads = malloc(sizeof(pthread_t) * M-1);
     int t;
     for(t=0;t<M-1;t++) {
-        if(pthread_create(&threads[t], NULL, (void *(*)(void *)) threadFunction, (void *) (t+1))) {
+        if(pthread_create(&threads[t], NULL, (void *(*)(void *)) threadFunction, (void *) (size_t) (t+1))) {
             perror("Error creating the thread for calculating the particles' forces: ");
             cancelThreads(threads, t);
         }
@@ -912,7 +873,7 @@ int main(int argc, char *argv[]){
     struct Node* tree = malloc(sizeof *tree);
 	//LLX is the x coordinate of the Low Left corner
     tree->LLX=0;
-	//This is the y coordinate..
+	//This is the y coordinate.
     tree->LLY=0;
 
 	//Now the same but for the top right corner
@@ -948,10 +909,17 @@ int main(int argc, char *argv[]){
 
             // Calculate the indexes of the particles to calculate its forces by the main thread
             int totalThreads = M;
-            int particlesPerThread = nLocal / totalThreads;
+            int particlesPerThread = globalStruct.nLocal / totalThreads;
+
+            // For preventing miscalculation of the average time for all threads, we update this time per M iterations variable here, in the M'th + 1 iteration
+            if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 1) {
+                pthread_mutex_lock(&statisticsMutex);
+                threadsStatistics[0].timePerMIterations = 0;
+                pthread_mutex_unlock(&statisticsMutex);
+            }
 
             pthread_mutex_lock(&remainingParticlesMutex);
-            remainingParticles = nLocal % totalThreads;
+            remainingParticles = globalStruct.nLocal % totalThreads;
 
             if (remainingParticles > 0) {
                 particlesPerThread++;
@@ -962,23 +930,31 @@ int main(int argc, char *argv[]){
             int start = 0;
             int end = particlesPerThread;
 
-            printf("Main thread calculating forces for particles %d to %d\n", start, end);
+            printf("[Main thread] calculating forces for particles %d to %d\n", start, end);
 
             // Assign values to the global struct
             globalStruct.localBuff = localBuff;
             globalStruct.indexes = indexes;
             globalStruct.sharedBuff = sharedBuff;
             globalStruct.tree = tree;
-            globalStruct.nShared = nShared;
 
             if (count==steps) {
                 globalStruct.lastIteration = true;
             }
+            globalStruct.actualIteration = count;
+
+            globalStatistics.evaluatedParticles += globalStruct.nLocal;
 
             // Unlock the semaphore to start the threads calculating the forces
             for (i = 0; i < M-1; i++) {
                 sem_post(&calculateForceSem);
             }
+
+            // Start the main thread clock
+            struct timespec startTime, endTime;
+            clock_gettime(CLOCK_MONOTONIC, &startTime);
+
+            int removedParticles = 0;
 
         	for(i=start;i<end;i++){
 				//Set initial accelerations to zero
@@ -995,15 +971,20 @@ int main(int argc, char *argv[]){
             	}
 				//Calculate new position
             	moveParticle(sharedBuff,localBuff,indexes[i]);
+
+                if(sharedBuff[PX(indexes[i])]<=0 || sharedBuff[PX(indexes[i])]>=1 || sharedBuff[PY(indexes[i])] <=0 || sharedBuff[PY(indexes[i])] >= 1){
+                    removedParticles++;
+                }
         	}
 
             // Wait for all the threads to finish its work
             sem_wait(&endedCalculatingForce);
+
             // Then check if there are particles outside the boundaries, and remove them
-            printf("All threads finished calculating forces, main thread will process the eliminated particles and continue to the next iteration\n");
             for (i = 0; i < globalStruct.nLocal; ++i) {
                 //Kick out particle if it went out of the box (0,1)x(0,1)
                 if(sharedBuff[PX(indexes[i])]<=0 || sharedBuff[PX(indexes[i])]>=1 || sharedBuff[PY(indexes[i])] <=0 || sharedBuff[PY(indexes[i])] >= 1){
+                    globalStatistics.removedParticles++;
                     int r;
                     globalStruct.nLocal--;
                     nShared--;
@@ -1012,6 +993,33 @@ int main(int argc, char *argv[]){
                     }
                     i--;
                 }
+            }
+
+            // Stop the main thread clock
+            clock_gettime(CLOCK_MONOTONIC, &endTime);
+            double timeElapsed = (endTime.tv_sec - startTime.tv_sec) + (endTime.tv_nsec - startTime.tv_nsec) / 1000000000.0;
+
+            // Update the main thread statistics
+            pthread_mutex_lock(&statisticsMutex);
+            threadsStatistics[0].timePerIteration += timeElapsed;
+            threadsStatistics[0].timePerMIterations += timeElapsed;
+            threadsStatistics[0].evaluatedParticles += end - start;
+            threadsStatistics[0].removedParticles += removedParticles;
+            pthread_mutex_unlock(&statisticsMutex);
+
+            // When all the threads have finished, we can print the main thread statistics
+            if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 0) {
+                double averageTimePerMIterations = 0;
+                pthread_mutex_lock(&statisticsMutex);
+                for (i = 0; i < numberOfThreads; i++) {
+                    averageTimePerMIterations += threadsStatistics[i].timePerMIterations;
+                }
+                averageTimePerMIterations /= numberOfThreads;
+                pthread_mutex_unlock(&statisticsMutex);
+                printf("Thread [%d]: Average of %f seconds per iteration, %f seconds of unbalance, %i evaluated particles, %i removed particles, %i of simplifications done.\n", 0, threadsStatistics[0].timePerIteration/count, threadsStatistics[0].timePerMIterations - averageTimePerMIterations, threadsStatistics[0].evaluatedParticles, threadsStatistics[0].removedParticles, threadsStatistics[0].numberOfSimplifications);
+
+                // We print also the global statistics
+                printf("Global statistics: %i evaluated particles, %i removed particles, %i of simplifications done.\n", globalStatistics.evaluatedParticles, globalStatistics.removedParticles, globalStatistics.numberOfSimplifications);
             }
 
 			//To be able to store the positions of the particles
@@ -1026,15 +1034,34 @@ int main(int argc, char *argv[]){
     // Join the threads
     for (i = 0; i < M-1; i++) {
         pthread_join(threads[i], NULL);
+        printf("[%d] joined\n", i+1);
     }
-
-    // Free the memory and destroy the mutexes and semaphores
-    free(threads);
-    destroySyncVariables();
 
     EndTime = clock();
     TimeSpent = (double)(EndTime - StartTime) / CLOCKS_PER_SEC;
-    printf("NBody Simulation took %.3f seconds.\n",TimeSpent);
+
+    // Print the global statistics
+    printf("Global statistics:\n");
+    printf("Total simulation time: %f seconds, %i evaluated particles, %i removed particles, %i of simplifications done.\n", TimeSpent, globalStatistics.evaluatedParticles, globalStatistics.removedParticles, globalStatistics.numberOfSimplifications);
+
+
+    // Print the threads statistics
+    printf("Threads statistics:\n");
+
+    double averageTimeOfAllThreads = 0;
+
+    for (i = 0; i < numberOfThreads; i++) {
+        averageTimeOfAllThreads += threadsStatistics[i].timePerIteration;
+    }
+    averageTimeOfAllThreads /= numberOfThreads;
+    for (i = 0; i < M; i++) {
+        printf("Thread [%d]: %f seconds of total work, %f seconds per iteration, %f seconds of total unbalance, %i evaluated particles, %i removed particles, %i of simplifications done.\n", i, threadsStatistics[i].timePerIteration, threadsStatistics[i].timePerIteration/steps, threadsStatistics[i].timePerIteration-averageTimeOfAllThreads,threadsStatistics[i].evaluatedParticles, threadsStatistics[i].removedParticles, threadsStatistics[i].numberOfSimplifications);
+    }
+
+    // Free the memory and destroy the mutexes and semaphores
+    free(threadsStatistics);
+    free(threads);
+    destroySyncVariables();
 
     // Save initial state.
     sprintf(filename,"./res/galaxy_%dB_%di_final.out",nOriginal, count-1);
