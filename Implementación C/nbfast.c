@@ -126,6 +126,8 @@ void destroySyncVariables(){
     pthread_barrier_destroy(&calculateForceBarrier);
     sem_destroy(&endedCalculatingForce);
     pthread_mutex_destroy(&statisticsMutex);
+    pthread_cond_destroy(&visualizationCond);
+    pthread_mutex_destroy(&visualizationMutex);
 }
 
 void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n){
@@ -265,7 +267,7 @@ int calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int i
             }
         }
     }
-    return simplifications;
+    return 0;
 }
 
 void buildTreeThread(struct BuildTreeStruct* data){
@@ -710,12 +712,18 @@ void uiThreadFunction() {
         pthread_mutex_lock(&visualizationMutex);
         pthread_cond_wait(&visualizationCond, &visualizationMutex);
         pthread_mutex_unlock(&visualizationMutex);
+        glClear(GL_COLOR_BUFFER_BIT);
+        double t=glfwGetTime();
 
         // If the condition is met, we can refresh the window.
         drawBarnesHutDivisions(uiStruct.tree);
         int k;
         for(k=0;k<uiStruct.nShared;k++){
             drawParticle(uiStruct.sharedBuff,uiStruct.radius,uiStruct.indexes[k]);
+        }
+        t=glfwGetTime()-t;
+        if(t<0.013){
+            usleep(1000*1000*(0.013-t));
         }
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -954,7 +962,7 @@ int main(int argc, char *argv[]){
         uiStruct.tree = malloc(sizeof(struct Node));
 
         while(count<=steps){
-            //First we build the tree
+            // First we build the tree
             // Create a BuildTreeStruct for passing the params to the buildTreeThread function
             struct BuildTreeStruct* data = malloc(sizeof(struct BuildTreeStruct));
             data->tree = tree;
@@ -1049,9 +1057,9 @@ int main(int argc, char *argv[]){
 
             // Update the ui struct copying the actual iteration results to it
             uiStruct.nShared = nShared;
-            *uiStruct.sharedBuff = *sharedBuff;
-            *uiStruct.indexes = *indexes;
-            *uiStruct.radius = *radius;
+            memcpy(uiStruct.sharedBuff, sharedBuff, sizeof(double) * (3 * nShared + 1));
+            memcpy(uiStruct.indexes, indexes, sizeof(int) * nShared);
+            memcpy(uiStruct.radius, radius, sizeof(double) * nShared);
             *uiStruct.tree = *tree;
 
             // Communicate the visualization thread that the particles have been updated and it can draw them
