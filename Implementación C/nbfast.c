@@ -267,7 +267,7 @@ int calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int i
             }
         }
     }
-    return 0;
+    return simplifications;
 }
 
 void buildTreeThread(struct BuildTreeStruct* data){
@@ -577,8 +577,6 @@ void threadFunction(int id) {
         if (end > globalStruct.nLocal) {
             end = globalStruct.nLocal;
         }
-
-        printf("Thread %d: start = %d, end = %d\n", id, start, end);
 
         double *localBuff = globalStruct.localBuff;
         int *indexes = globalStruct.indexes;
@@ -986,8 +984,6 @@ int main(int argc, char *argv[]){
             int start = 0;
             int end = particlesPerThread;
 
-            printf("[Main thread] calculating forces for particles %d to %d\n", start, end);
-
             // Assign values to the global struct
             globalStruct.localBuff = localBuff;
             globalStruct.indexes = indexes;
@@ -1131,8 +1127,6 @@ int main(int argc, char *argv[]){
             int start = 0;
             int end = particlesPerThread;
 
-            printf("[Main thread] calculating forces for particles %d to %d\n", start, end);
-
             // Assign values to the global struct
             globalStruct.localBuff = localBuff;
             globalStruct.indexes = indexes;
@@ -1249,13 +1243,15 @@ int main(int argc, char *argv[]){
     EndTime = clock();
     TimeSpent = (double)(EndTime - StartTime) / CLOCKS_PER_SEC;
 
+    printf("\n*FINAL STATISTICS*\n");
+
     // Print the global statistics
-    printf("Global statistics:\n");
+    printf("\nGlobal statistics:\n");
     printf("Total simulation time: %f seconds, %i evaluated particles, %i removed particles, %i of simplifications done.\n", TimeSpent, globalStatistics.evaluatedParticles, globalStatistics.removedParticles, globalStatistics.numberOfSimplifications);
 
 
     // Print the threads statistics
-    printf("Threads statistics:\n");
+    printf("\nThreads statistics:\n");
 
     double averageTimeOfAllThreads = 0;
 
