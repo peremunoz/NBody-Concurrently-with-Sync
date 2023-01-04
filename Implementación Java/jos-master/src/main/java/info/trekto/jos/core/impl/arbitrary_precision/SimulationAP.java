@@ -1,5 +1,5 @@
 /*
-Práctica 2.
+Práctica 4.
 Código fuente: SimulationAP.java
 Grau Informàtica
 48252062V - Pere Muñoz Figuerol
@@ -7,6 +7,7 @@ Grau Informàtica
 
 package info.trekto.jos.core.impl.arbitrary_precision;
 
+import info.trekto.jos.core.Controller;
 import info.trekto.jos.core.ForceCalculator;
 import info.trekto.jos.core.Simulation;
 import info.trekto.jos.core.exceptions.SimulationException;
@@ -18,14 +19,17 @@ import info.trekto.jos.core.model.impl.SimulationObjectImpl;
 import info.trekto.jos.core.numbers.Number;
 import info.trekto.jos.util.Utils;
 import org.apache.commons.lang3.NotImplementedException;
+import org.apache.commons.lang3.time.StopWatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.util.*;
 
 import static info.trekto.jos.core.Controller.C;
 // import static info.trekto.jos.core.impl.arbitrary_precision.SimulationRecursiveAction.threshold;
+import static info.trekto.jos.core.Controller.main;
 import static info.trekto.jos.util.Utils.*;
 
 /**
@@ -49,16 +53,76 @@ public class SimulationAP implements Simulation {
     
     private volatile boolean collisionExists;
 
+    // Define a thread list for the threads that will be created
+    private static List<Thread> threads;
+
+    // Define a List for storing the statistics of each thread
+    private static List<Statistics> threadsStatistics;
+    private static Statistics mainThreadStatistics;
+
+    // Define a Statistics object for storing the global statistics
+    private static Statistics globalStatistics;
+
+    // Get M from the arguments
+    private static int M;
+
     public SimulationAP(SimulationProperties properties) {
+        threads = new ArrayList<>();
         simulationLogic = new SimulationLogicAP(this);
         this.properties = properties;
+
+        // Initialize the threads and start them
+        for (int i = 0; i < properties.getNumberOfThreads(); i++) {
+            int finalI = i;
+            threads.add(new Thread(() -> {
+                try {
+                    simulationLogic.threadFunction(finalI + 1);
+                } catch (Exception e) {
+                    cancelThreads();
+                    e.printStackTrace();
+                }
+            }));
+        }
+
+        for (Thread thread : threads) {
+            thread.start();
+        }
+
+        // Initialize the threadsStatistics list
+        threadsStatistics = new LinkedList<>();
+        for (int i = 0; i < properties.getNumberOfThreads()+1; i++) {
+            threadsStatistics.add(new Statistics());
+        }
+        mainThreadStatistics = new Statistics();
+
+        // Initialize the globalStatistics object
+        globalStatistics = new Statistics();
+
+        // Get M from the program arguments
+        M = Integer.parseInt(Controller.getArgs()[0]);
     }
 
-    public static void cancelThreads(List<Thread> threads) {
+    public static void cancelThreads() {
         for (Thread thread : threads) {
             thread.interrupt();
         }
         System.exit(-1);
+    }
+
+    public static Statistics getStatistics() {
+        return globalStatistics;
+    }
+
+    public static Statistics getMainThreadStatistics() {
+        return mainThreadStatistics;
+    }
+
+    public static List<Statistics> getThreadsStatistics() {
+        return threadsStatistics;
+    }
+
+    public static int getM() {
+        return M;
     }
 
     public boolean collisionExists(List<SimulationObject> objects) {
@@ -94,50 +158,34 @@ public class SimulationAP implements Simulation {
     public void doIteration(boolean saveCurrentIterationToFile, long iterationCounter) throws InterruptedException {
         auxiliaryObjects = deepCopy(objects);
 
-        /* Distribute simulation objects per threads and start execution *
-        threshold = objects.size() / CORES;
-        if (threshold < 20) {
-            threshold = 20;
-        }
-        */
-        //new SimulationRecursiveAction(0, objects.size(), this).compute();
+        // Start the clock for the main thread statistics
+        long startTime = System.currentTimeMillis();
+
         simulationLogic.calculateAllNewValues();
 
+
+        // Wait for the threads to finish their calculations
+        long startWaitingTime = System.currentTimeMillis();
+        simulationLogic.getCalculateNewValuesSemaphore().acquire(properties.getNumberOfThreads());
+        long elapsedWaitingTime = System.currentTimeMillis() - startWaitingTime;
+
         /* Collision */
-        // Calculate the variables for concurrent execution
-        int numberOfThreads = properties.getNumberOfThreads();
-        int numberOfObjects = auxiliaryObjects.size();
-        int objectsPerThread = numberOfObjects / numberOfThreads;
-        int objectsLeft = numberOfObjects % numberOfThreads;
-        collisionExists = false;
 
-        List<Thread> threads = new ArrayList<>();
-        for (int i = 0; i < numberOfThreads; i++) {
-            // Calculate the number of objects for the current thread
-            int start = i * objectsPerThread;
-            int end = start + objectsPerThread;
-            if (i == numberOfThreads - 1) {
-                end += objectsLeft;
-            }
-            // Create the CollisionCheckAP object, with the start and end indexes defined, and start the thread
-            CollisionCheckAP collisionCheck = new CollisionCheckAP(start, end, this);
-            Thread thread = new Thread(new Runnable() {
-                public void run() {
-                    collisionCheck.checkAllCollisions();
-                }
-            });
-            thread.start();
-            threads.add(thread);
-        }
+        // Calculate the main thread collisions' indexes
+        int start = 0;
+        int end = objects.size() / (properties.getNumberOfThreads()+1);
+        CollisionCheckAP collisionCheck = new CollisionCheckAP(start, end, this);
 
-        for (Thread thread : threads) {
-            try {
-                thread.join();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-                cancelThreads(threads);
-            }
-        }
+        // Signal the threads to start checking for collisions
+        simulationLogic.getCheckCollisionsSemaphore().release(properties.getNumberOfThreads());
+
+        // Start the main thread's collision check
+        collisionCheck.checkAllCollisions();
+
+        // Wait for the threads to finish checking for collisions
+        long startWaitingTime2 = System.currentTimeMillis();
+        simulationLogic.getEndedCheckingCollisionsSemaphore().acquire(properties.getNumberOfThreads());
+        elapsedWaitingTime += System.currentTimeMillis() - startWaitingTime2;
 
         /* If collision/s exists execute sequentially on a single thread */
         if (collisionExists) {
@@ -145,6 +193,17 @@ public class SimulationAP implements Simulation {
         }
 
         objects = auxiliaryObjects;
+
+        // Stop the clock for the main thread statistics
+        long elapsedTime = System.currentTimeMillis() - startTime - elapsedWaitingTime;
+
+        // Update the main thread statistics
+        mainThreadStatistics.addTime(elapsedTime);
+
+        // Add the main thread statistics to the statistics list
+        simulationLogic.getStatisticsLock().lock();
+        threadsStatistics.set(0, mainThreadStatistics);
+        simulationLogic.getStatisticsLock().unlock();
 
         /* Slow down visualization */
         if (properties.isRealTimeVisualization() && properties.getPlayingSpeed() < 0) {
@@ -273,6 +332,28 @@ public class SimulationAP implements Simulation {
                 C.getVisualizer().end();
             }
             endTime = System.nanoTime();
+
+            // Print final statistics
+            System.out.println("Global statistics:");
+            System.out.println("Total time: " + (endTime - startTime) + " ms");
+            System.out.println("Evaluated particles: " + globalStatistics.getEvaluatedParticles());
+            System.out.println("Merged particles: " + globalStatistics.getMergedParticles());
+
+            for (int i = 0; i < threadsStatistics.size(); i++) {
+                System.out.println("Thread " + i + " statistics:");
+                System.out.println("Total time: " + threadsStatistics.get(i).getTotalTime() + " ms");
+                System.out.println("Evaluated particles: " + threadsStatistics.get(i).getEvaluatedParticles());
+                System.out.println("Merged particles: " + threadsStatistics.get(i).getMergedParticles());
+            }
+
+            // Join threads
+            for (Thread thread : threads) {
+                thread.join();
+                System.out.println("Thread " + thread.getName() + " joined.");
+            }
+
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
         } finally {
             C.setRunning(false);
             if (properties.isSaveToFile()) {

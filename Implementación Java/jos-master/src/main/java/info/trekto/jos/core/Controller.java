@@ -73,7 +73,10 @@ public enum Controller {
     private Color defaultButtonColor;
     private boolean hasToStopCpuGpuMeasuring = false;
 
+    private static String[] arguments;
+
     public static void main(String[] args) {
+        arguments = args;
         Properties applicationProperties = new Properties();
         JFrame jFrame = new JFrame();
         MainForm mainForm = new MainForm();
@@ -125,6 +128,10 @@ public enum Controller {
         C.setExecutionModeFieldVisibilityAndValue();
         C.setCpuGpuThresholdVisibility();
         C.setReaderWriter(new JsonReaderWriter());
+    }
+
+    public static String[] getArgs() {
+        return arguments;
     }
 
     public static int getCpuThreshold() {

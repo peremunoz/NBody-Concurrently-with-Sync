@@ -1,5 +1,5 @@
 /*
-Práctica 2.
+Práctica 4.
 Código fuente: SimulationLogicAP.java
 Grau Informàtica
 48252062V - Pere Muñoz Figuerol
@@ -17,8 +17,12 @@ import info.trekto.jos.core.numbers.Number;
 import java.awt.*;
 import java.util.List;
 import java.util.*;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static info.trekto.jos.core.Controller.C;
+import static info.trekto.jos.core.Controller.main;
 import static info.trekto.jos.core.numbers.NumberFactoryProxy.*;
 
 /**
@@ -27,9 +31,122 @@ import static info.trekto.jos.core.numbers.NumberFactoryProxy.*;
  */
 public class SimulationLogicAP implements SimulationLogic {
     private final Simulation simulation;
+    // Declare a semaphore to control the execution of the different iterations
+    private final Semaphore iterationSemaphore = new Semaphore(0);
+    private final Semaphore calculateNewValuesSemaphore = new Semaphore(0);
+
+    private final Semaphore checkCollisionsSemaphore = new Semaphore(0);
+
+    private final Semaphore endedCheckingCollisionsSemaphore = new Semaphore(0);
+
+    private final Lock statisticsLock = new ReentrantLock();
 
     public SimulationLogicAP(Simulation simulation) {
         this.simulation = simulation;
+
+    }
+
+    public void threadFunction(int id) throws InterruptedException {
+        Statistics statistics = new Statistics();
+        List<Statistics> threadStatistics = SimulationAP.getThreadsStatistics();
+        while (true) {
+            // Wait for the main thread signal for starting the next iteration using a semaphore
+            iterationSemaphore.acquire();
+
+            // Start the clock for the statistics
+            long startTime = System.currentTimeMillis();
+
+            long iterationNumber = simulation.getCurrentIterationNumber();
+
+            // Now that the main thread has signaled us, we can start the iteration
+
+            // Calculate the number of objects that will be processed by this thread
+            int start;
+            int end;
+            synchronized (simulation) {
+                int objectsPerThread = simulation.getObjects().size() / (simulation.getProperties().getNumberOfThreads()+1);
+                start = id * objectsPerThread;
+                end = (id + 1) * objectsPerThread;
+                if (end > simulation.getObjects().size()) {
+                    end = simulation.getObjects().size();
+                }
+            }
+
+            // Process the objects
+            calculateNewValues(start, end);
+
+            // Signal the main thread that we have finished the calculation of the new values
+            calculateNewValuesSemaphore.release();
+
+            // And now wait for the main thread to signal us that we can start checking for collisions
+            long startWaitTime = System.currentTimeMillis();
+            checkCollisionsSemaphore.acquire();
+            long endWaitTime = System.currentTimeMillis();
+            long waitTime = endWaitTime - startWaitTime;
+
+            // Now that the main thread has signaled us, we can start checking for collisions
+
+            // Check for collisions
+            CollisionCheckAP collisionCheck = new CollisionCheckAP(start, end, simulation);
+            collisionCheck.checkAllCollisions();
+
+            // Signal the main thread that we have finished checking for collisions
+            endedCheckingCollisionsSemaphore.release();
+
+            long endTime = System.currentTimeMillis();
+            long elapsedTime = endTime - startTime - waitTime;
+
+            // Update the statistics
+            statistics.addTime(elapsedTime);
+            statistics.addEvaluatedParticles(end - start);
+
+            // Check if the simulation has ended
+            if (iterationNumber == simulation.getProperties().getNumberOfIterations()) {
+                System.out.println("[Thread " + id + "] has finished");
+                return;
+            }
+
+            // Check if it's time to print the statistics
+            if (iterationNumber % SimulationAP.getM() == 0) {
+                // Update statistics to the global list
+                statisticsLock.lock();
+                threadStatistics.set(id, statistics);
+                statisticsLock.unlock();
+
+                // Print the statistics
+                System.out.println("[Thread " + id + "] Statistics for iteration " + iterationNumber + ": ");
+                System.out.print("Time per iteration: " + (elapsedTime/iterationNumber) + " ms, ");
+                long averageMTime = 0;
+                statisticsLock.lock();
+                for (Statistics threadStatistic : threadStatistics) {
+                    averageMTime += threadStatistic.getTimePerMIterations();
+                }
+                averageMTime /= threadStatistics.size();
+                statisticsLock.unlock();
+                System.out.print("Generated unbalance: " + (statistics.getTimePerMIterations()-averageMTime) + " ms, ");
+                System.out.print("Evaluated particles: " + statistics.getEvaluatedParticles());
+                System.out.println("Merged particles: " + statistics.getMergedParticles());
+
+                // Reset the M statistics
+                statistics.resetTimePerMIterations();
+            }
+        }
+    }
+
+    public Semaphore getCheckCollisionsSemaphore() {
+        return checkCollisionsSemaphore;
+    }
+
+    public Semaphore getCalculateNewValuesSemaphore() {
+        return calculateNewValuesSemaphore;
+    }
+
+    public Semaphore getEndedCheckingCollisionsSemaphore() {
+        return endedCheckingCollisionsSemaphore;
+    }
+
+    public Lock getStatisticsLock() {
+        return statisticsLock;
     }
 
     public void calculateNewValues(int fromIndex, int toIndex) {
@@ -84,44 +201,26 @@ public class SimulationLogicAP implements SimulationLogic {
     }
 
     public void calculateAllNewValues() {
-        // Calculation of variables for concurrent processing
-        int numberOfObjects = simulation.getObjects().size();
-        int numberOfThreads = simulation.getProperties().getNumberOfThreads();
-        int numberOfObjectsPerThread = numberOfObjects / numberOfThreads;
-        int numberOfObjectsLeft = numberOfObjects % numberOfThreads;
+        Statistics mainThreadStatistics = SimulationAP.getMainThreadStatistics();
+        // Signal the threads that they can start calculating
+        iterationSemaphore.release(simulation.getProperties().getNumberOfThreads());
 
-        List<Thread> threads = new ArrayList<Thread>();
-        for (int i = 0; i < numberOfThreads; i++) {
-            // Calculate the indexes of the objects for the current thread
-            int fromIndex = i * numberOfObjectsPerThread;
-            int toIndex = fromIndex + numberOfObjectsPerThread;
-            if (i == numberOfThreads - 1) {
-                toIndex += numberOfObjectsLeft;
-            }
-            final int fromIndexFinal = fromIndex;
-            final int toIndexFinal = toIndex;
-            Thread thread = new Thread(new Runnable() {
-                public void run() {
-                    calculateNewValues(fromIndexFinal, toIndexFinal);
-                }
-            });
-            // Add the thread to the Thread ArrayList and start it
-            threads.add(thread);
-            thread.start();
+        int start;
+        int end;
+        synchronized (simulation) {
+            int objectsPerThread = simulation.getObjects().size() / (simulation.getProperties().getNumberOfThreads()+1);
+            start = 0;
+            end = objectsPerThread;
         }
 
-        // Wait for all threads to finish
-        for (Thread thread : threads) {
-            try {
-                thread.join();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-                SimulationAP.cancelThreads(threads);
-            }
-        }
+        mainThreadStatistics.addEvaluatedParticles(end - start);
+
+        // Process the objects
+        calculateNewValues(start, end);
     }
 
     public void processCollisions(Simulation simulation) {
+        Statistics statistics = SimulationAP.getStatistics();
         boolean mergeOnCollision = simulation.getProperties().isMergeOnCollision();
         List<ImmutableSimulationObject> forRemoval = null;
         Set<Map.Entry<SimulationObject, SimulationObject>> processedElasticCollision = null;
@@ -166,6 +265,7 @@ public class SimulationLogicAP implements SimulationLogic {
                         forRemoval.add(smaller);
 
                         /* Objects merging */
+                        statistics.addMergedParticles(1);
                         /* Velocity */
                         bigger.setVelocity(calculateVelocityOnMerging(smaller, bigger));
 
