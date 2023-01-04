@@ -8,8 +8,8 @@ Grau Informàtica
 package info.trekto.jos.core.impl.arbitrary_precision;
 
 public class Statistics {
-    private long totalTime;
-    private long timePerMIterations;
+    private float totalTime;
+    private float timePerMIterations;
     private int evaluatedParticles;
     private int mergedParticles;
 
@@ -20,7 +20,7 @@ public class Statistics {
         mergedParticles = 0;
     }
 
-    public void addTime(long time) {
+    public void addTime(float time) {
         totalTime += time;
         timePerMIterations += time;
     }
@@ -37,11 +37,11 @@ public class Statistics {
         mergedParticles += particles;
     }
 
-    public long getTotalTime() {
+    public float getTotalTime() {
         return totalTime;
     }
 
-    public long getTimePerMIterations() {
+    public float getTimePerMIterations() {
         return timePerMIterations;
     }
 

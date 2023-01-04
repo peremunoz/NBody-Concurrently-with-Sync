@@ -39,6 +39,8 @@ public class SimulationLogicAP implements SimulationLogic {
 
     private final Semaphore endedCheckingCollisionsSemaphore = new Semaphore(0);
 
+    private final Semaphore printStatisticsSemaphore = new Semaphore(0);
+
     private final Lock statisticsLock = new ReentrantLock();
 
     public SimulationLogicAP(Simulation simulation) {
@@ -49,14 +51,20 @@ public class SimulationLogicAP implements SimulationLogic {
     public void threadFunction(int id) throws InterruptedException {
         Statistics statistics = new Statistics();
         List<Statistics> threadStatistics = SimulationAP.getThreadsStatistics();
+        int balanceModifier;
         while (true) {
             // Wait for the main thread signal for starting the next iteration using a semaphore
             iterationSemaphore.acquire();
 
             // Start the clock for the statistics
-            long startTime = System.currentTimeMillis();
+            float startTime = System.nanoTime();
 
             long iterationNumber = simulation.getCurrentIterationNumber();
+
+            if (iterationNumber % SimulationAP.getM() == 1 && iterationNumber != 1) {
+                // Reset the M statistics the Mts+1 iteration
+                statistics.resetTimePerMIterations();
+            }
 
             // Now that the main thread has signaled us, we can start the iteration
 
@@ -66,11 +74,13 @@ public class SimulationLogicAP implements SimulationLogic {
             synchronized (simulation) {
                 int objectsPerThread = simulation.getObjects().size() / (simulation.getProperties().getNumberOfThreads()+1);
                 start = id * objectsPerThread;
-                end = (id + 1) * objectsPerThread;
-                if (end > simulation.getObjects().size()) {
+                end = (id+1) * objectsPerThread;
+                if (end > simulation.getObjects().size() || id == simulation.getProperties().getNumberOfThreads()) {
                     end = simulation.getObjects().size();
                 }
             }
+
+            System.out.println("Thread " + id + " will process objects from " + start + " to " + end);
 
             // Process the objects
             calculateNewValues(start, end);
@@ -79,10 +89,10 @@ public class SimulationLogicAP implements SimulationLogic {
             calculateNewValuesSemaphore.release();
 
             // And now wait for the main thread to signal us that we can start checking for collisions
-            long startWaitTime = System.currentTimeMillis();
+            float startWaitTime = System.nanoTime();
             checkCollisionsSemaphore.acquire();
-            long endWaitTime = System.currentTimeMillis();
-            long waitTime = endWaitTime - startWaitTime;
+            float endWaitTime = System.nanoTime();
+            float waitTime = endWaitTime - startWaitTime;
 
             // Now that the main thread has signaled us, we can start checking for collisions
 
@@ -93,8 +103,8 @@ public class SimulationLogicAP implements SimulationLogic {
             // Signal the main thread that we have finished checking for collisions
             endedCheckingCollisionsSemaphore.release();
 
-            long endTime = System.currentTimeMillis();
-            long elapsedTime = endTime - startTime - waitTime;
+            float endTime = System.nanoTime();
+            float elapsedTime = endTime - startTime - waitTime;
 
             // Update the statistics
             statistics.addTime(elapsedTime);
@@ -111,24 +121,23 @@ public class SimulationLogicAP implements SimulationLogic {
                 // Update statistics to the global list
                 statisticsLock.lock();
                 threadStatistics.set(id, statistics);
-                statisticsLock.unlock();
 
                 // Print the statistics
-                System.out.println("[Thread " + id + "] Statistics for iteration " + iterationNumber + ": ");
-                System.out.print("Time per iteration: " + (elapsedTime/iterationNumber) + " ms, ");
-                long averageMTime = 0;
-                statisticsLock.lock();
+                System.out.println("\n[Thread " + id + "] Statistics for iteration " + iterationNumber + ": ");
+                System.out.print("Time per iteration: " + (elapsedTime/iterationNumber)/(1000.0*1000.0*1000.0) + "s, ");
+                float averageMTime = 0;
                 for (Statistics threadStatistic : threadStatistics) {
                     averageMTime += threadStatistic.getTimePerMIterations();
                 }
                 averageMTime /= threadStatistics.size();
-                statisticsLock.unlock();
-                System.out.print("Generated unbalance: " + (statistics.getTimePerMIterations()-averageMTime) + " ms, ");
+                System.out.print("Generated unbalance: " + (statistics.getTimePerMIterations()-averageMTime)/(1000.0*1000.0*1000.0) + " s, ");
                 System.out.print("Evaluated particles: " + statistics.getEvaluatedParticles());
-                System.out.println("Merged particles: " + statistics.getMergedParticles());
+                System.out.println(" Merged particles: " + statistics.getMergedParticles());
+                System.out.flush();
+                statisticsLock.unlock();
 
-                // Reset the M statistics
-                statistics.resetTimePerMIterations();
+                // Signal the main thread that we have finished printing the statistics
+                printStatisticsSemaphore.release();
             }
         }
     }
@@ -143,6 +152,10 @@ public class SimulationLogicAP implements SimulationLogic {
 
     public Semaphore getEndedCheckingCollisionsSemaphore() {
         return endedCheckingCollisionsSemaphore;
+    }
+
+    public Semaphore getPrintStatisticsSemaphore() {
+        return printStatisticsSemaphore;
     }
 
     public Lock getStatisticsLock() {
