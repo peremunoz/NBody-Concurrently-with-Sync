@@ -1,3 +1,9 @@
+/*
+Práctica 4.
+Código fuente: Controller.java
+Grau Informàtica
+48252062V - Pere Muñoz Figuerol
+*/
 package info.trekto.jos.core;
 
 import info.trekto.jos.core.exceptions.SimulationException;
@@ -73,6 +79,7 @@ public enum Controller {
     private Color defaultButtonColor;
     private boolean hasToStopCpuGpuMeasuring = false;
 
+    // Attribute for storing the M parameter
     private static String[] arguments;
 
     public static void main(String[] args) {
