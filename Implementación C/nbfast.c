@@ -71,6 +71,7 @@ struct GlobalStruct{
     struct Node *tree;
     int actualIteration;
     bool lastIteration;
+    int nIterations;
 };
 
 struct UIStruct{
@@ -628,7 +629,7 @@ void threadFunction(int id) {
         int ret = pthread_barrier_wait(&calculateForceBarrier);
 
         // Once all threads have finished its calculation and updated its statistics, we can print the partial results if needed.
-        if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 0) {
+        if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 0 && globalStruct.actualIteration != globalStruct.nIterations) {
             double averageTimePerMIterations = 0;
             pthread_mutex_lock(&statisticsMutex);
             for (i = 0; i < numberOfThreads; i++) {
@@ -856,6 +857,7 @@ int main(int argc, char *argv[]){
     // Initialize global variables
     numberOfThreads = M;
     globalStruct.lastIteration = false;
+    globalStruct.nIterations = steps;
 
     // Init the threads statistics array
     threadsStatistics = (struct Statistics *) malloc(sizeof(struct Statistics) * M);
@@ -975,7 +977,7 @@ int main(int argc, char *argv[]){
             int particlesPerThread = globalStruct.nLocal / totalThreads;
 
             // For preventing miscalculation of the average time for all threads, we update this time per M iterations variable here, in the M'th + 1 iteration
-            if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 1) {
+            if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 1 && globalStruct.actualIteration != steps) {
                 pthread_mutex_lock(&statisticsMutex);
                 threadsStatistics[0].timePerMIterations = 0;
                 pthread_mutex_unlock(&statisticsMutex);
@@ -1207,7 +1209,7 @@ int main(int argc, char *argv[]){
             pthread_mutex_unlock(&statisticsMutex);
 
             // When all the threads have finished, we can print the main thread statistics
-            if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 0) {
+            if (globalStruct.actualIteration > 0 && globalStruct.actualIteration % iterationsToPrint == 0 && globalStruct.actualIteration != steps) {
                 double averageTimePerMIterations = 0;
                 pthread_mutex_lock(&statisticsMutex);
                 for (i = 0; i < numberOfThreads; i++) {
