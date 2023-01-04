@@ -962,6 +962,13 @@ int main(int argc, char *argv[]){
         uiStruct.tree = malloc(sizeof(struct Node));
 
         while(count<=steps){
+
+            // Check if there are enough particles to continue
+            if(nShared < 1) {
+                cancelThreads(threads, numberOfThreads-1);
+                break;
+            }
+
             // First we build the tree
             // Create a BuildTreeStruct for passing the params to the buildTreeThread function
             struct BuildTreeStruct* data = malloc(sizeof(struct BuildTreeStruct));
@@ -1103,6 +1110,13 @@ int main(int argc, char *argv[]){
 		//This is the pure algorithm, without visualization
 		//system("mkdir res");
     	while(count<=steps){
+
+            // Check if there are enough particles to continue
+            if(nShared < 1) {
+                cancelThreads(threads, numberOfThreads-1);
+                break;
+            }
+
 			//First we build the tree
             // Create a BuildTreeStruct for passing the params to the buildTreeThread function
             struct BuildTreeStruct* data = malloc(sizeof(struct BuildTreeStruct));
