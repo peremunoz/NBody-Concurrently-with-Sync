@@ -1,3 +1,10 @@
+/*
+Práctica 4.
+Código fuente: Statistics.java
+Grau Informàtica
+48252062V - Pere Muñoz Figuerol
+*/
+
 package info.trekto.jos.core.impl.arbitrary_precision;
 
 public class Statistics {
