@@ -71,6 +71,16 @@ public class SimulationAP implements Simulation {
         simulationLogic = new SimulationLogicAP(this);
         this.properties = properties;
 
+        // Initialize the threadsStatistics list
+        threadsStatistics = new LinkedList<>();
+        for (int i = 0; i < properties.getNumberOfThreads()+1; i++) {
+            threadsStatistics.add(new Statistics());
+        }
+
+        mainThreadStatistics = new Statistics();
+
+        threadsStatistics.set(0, mainThreadStatistics);
+
         // Initialize the threads and start them
         for (int i = 0; i < properties.getNumberOfThreads(); i++) {
             int finalI = i;
@@ -87,13 +97,6 @@ public class SimulationAP implements Simulation {
         for (Thread thread : threads) {
             thread.start();
         }
-
-        // Initialize the threadsStatistics list
-        threadsStatistics = new LinkedList<>();
-        for (int i = 0; i < properties.getNumberOfThreads()+1; i++) {
-            threadsStatistics.add(new Statistics());
-        }
-        mainThreadStatistics = new Statistics();
 
         // Initialize the globalStatistics object
         globalStatistics = new Statistics();
@@ -180,6 +183,7 @@ public class SimulationAP implements Simulation {
         int start = 0;
         int end = objects.size() / (properties.getNumberOfThreads()+1);
         CollisionCheckAP collisionCheck = new CollisionCheckAP(start, end, this);
+        collisionExists = false;
 
         System.out.println("[MAIN THREAD] Start: " + start + " End: " + end);
 
@@ -187,11 +191,15 @@ public class SimulationAP implements Simulation {
         simulationLogic.getCheckCollisionsSemaphore().release(properties.getNumberOfThreads());
 
         // Start the main thread's collision check
-        collisionCheck.checkAllCollisions();
+        synchronized (SimulationAP.class) {
+            collisionCheck.checkAllCollisions();
+        }
+        System.out.println("[MAIN THREAD] Ended checking collisions");
 
         // Wait for the threads to finish checking for collisions
         float startWaitingTime2 = System.nanoTime();
         simulationLogic.getEndedCheckingCollisionsSemaphore().acquire(properties.getNumberOfThreads());
+
         elapsedWaitingTime += System.nanoTime() - startWaitingTime2;
 
         /* If collision/s exists execute sequentially on a single thread */
@@ -207,33 +215,33 @@ public class SimulationAP implements Simulation {
         // Update the main thread statistics
         mainThreadStatistics.addTime(elapsedTime);
 
-        // Add the main thread statistics to the statistics list
-        simulationLogic.getStatisticsLock().lock();
-        threadsStatistics.set(0, mainThreadStatistics);
-        simulationLogic.getStatisticsLock().unlock();
-
         // Print the main thread statistics if needed
         if (iterationCounter % M == 0 && iterationCounter != 0 && iterationCounter != properties.getNumberOfIterations()) {
-            // Print the statistics
-            System.out.println("\n[Thread 0] Statistics for iteration " + iterationCounter + ": ");
-            System.out.print("Time per iteration: " + (elapsedTime/iterationCounter)/(1000.0*1000.0*1000.0) + "s, ");
-            float averageMTime = 0;
-            simulationLogic.getStatisticsLock().lock();
-            for (Statistics threadStatistic : threadsStatistics) {
-                averageMTime += threadStatistic.getTimePerMIterations();
-            }
-            averageMTime /= threadsStatistics.size();
-            System.out.print("Generated unbalance: " + (mainThreadStatistics.getTimePerMIterations()-averageMTime)/(1000.0*1000.0*1000.0) + " s, ");
-            System.out.print("Evaluated particles: " + mainThreadStatistics.getEvaluatedParticles());
-            System.out.println(" Merged particles: " + mainThreadStatistics.getMergedParticles());
-            simulationLogic.getStatisticsLock().unlock();
+
+            // Now signal the threads that they can continue because all collisions have been checked
+            simulationLogic.getContinueToPrintStatisticsSemaphore().release(properties.getNumberOfThreads());
 
             // Wait for the threads to finish printing their statistics
             simulationLogic.getPrintStatisticsSemaphore().acquire(properties.getNumberOfThreads());
 
+            // Print the statistics
+            simulationLogic.getStatisticsLock().lock();
+            System.out.println("\n[Thread 0] Statistics for iteration " + iterationCounter + ": ");
+            System.out.print("Time per iteration: " + elapsedTime/((float)iterationCounter*(float)1000000) + "ms, ");
+            System.out.print("Total execution time: " + mainThreadStatistics.getTotalTime()/((float)1000000000) + "s, ");
+
+            float averageMTime = 0;
+            for (Statistics threadStatistic : threadsStatistics) {
+                averageMTime += threadStatistic.getTimePerMIterations();
+            }
+            averageMTime /= threadsStatistics.size();
+            System.out.print("Generated unbalance: " + (mainThreadStatistics.getTimePerMIterations()-averageMTime)/(1000000) + "ms, ");
+            System.out.print("Evaluated particles: " + mainThreadStatistics.getEvaluatedParticles());
+            System.out.println(" Merged particles: " + mainThreadStatistics.getMergedParticles());
+            simulationLogic.getStatisticsLock().unlock();
+
             // Print the global statistics
             System.out.println("\nGlobal statistics for iteration " + iterationCounter + ": ");
-            System.out.print("Time per iteration: " + globalStatistics.getTotalTime()/iterationCounter/(1000.0*1000.0*1000.0) + "s, ");
             System.out.print("Evaluated particles: " + globalStatistics.getEvaluatedParticles());
             System.out.println(" Merged particles: " + globalStatistics.getMergedParticles());
 
