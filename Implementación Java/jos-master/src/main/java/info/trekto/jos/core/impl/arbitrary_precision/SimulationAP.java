@@ -171,7 +171,6 @@ public class SimulationAP implements Simulation {
         // Update the global statistics
         globalStatistics.addEvaluatedParticles(objects.size());
 
-
         // Wait for the threads to finish their calculations
         float startWaitingTime = System.nanoTime();
         simulationLogic.getCalculateNewValuesSemaphore().acquire(properties.getNumberOfThreads());

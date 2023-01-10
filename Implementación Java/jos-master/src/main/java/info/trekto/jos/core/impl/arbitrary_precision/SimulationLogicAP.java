@@ -112,7 +112,6 @@ public class SimulationLogicAP implements SimulationLogic {
             synchronized (SimulationAP.class) {
                 collisionCheck.checkAllCollisions();
             }
-            System.out.println("Thread " + id + " Ended checking collisions");
 
             float endTime = System.nanoTime();
             float elapsedTime = endTime - startTime - waitTime;
