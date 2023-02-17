@@ -2,7 +2,7 @@
 Práctica 3.
 Código fuente : nbfast.c
 Grau Informàtica
-Pere Muñoz Figuerol - 48252062V
+Pere Muñoz Figuerol
 --------------------------------------------------------------- */
 
 // Usage: NBody* <particle number> <iterations number> [particle file] [0: console mode / other: graphic mode] [threads number]
