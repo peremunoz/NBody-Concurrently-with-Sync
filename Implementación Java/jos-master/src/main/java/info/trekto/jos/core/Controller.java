@@ -2,7 +2,7 @@
 Práctica 4.
 Código fuente: Controller.java
 Grau Informàtica
-48252062V - Pere Muñoz Figuerol
+Pere Muñoz Figuerol
 */
 package info.trekto.jos.core;
 
